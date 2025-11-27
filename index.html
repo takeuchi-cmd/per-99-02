@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>九九タイムアタック</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font (Optional, but good practice) -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        .shadow-custom {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05), 0 0 0 4px rgba(79, 70, 229, 0.2); /* Indigo-600 ring */
+        }
+        /* アプリで使用するカスタムスタイル */
+        .celebration-message {
+            animation: pulse-grow 1s infinite alternate;
+        }
+        @keyframes pulse-grow {
+            from { transform: scale(1); opacity: 0.9; }
+            to { transform: scale(1.05); opacity: 1; }
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8 min-h-screen flex items-center justify-center">
+
+    <div id="app" class="bg-white p-6 sm:p-10 rounded-2xl shadow-custom w-full max-w-lg transition-all duration-300">
+        <h1 class="text-3xl font-bold text-indigo-700 mb-2 text-center">九九タイムアタック</h1>
+        <p class="text-center text-gray-500 mb-6">6〜9の段から5問出題！早さを競おう！</p>
+
+        <!-- スコア表示エリア -->
+        <div class="grid grid-cols-2 gap-4 mb-8 text-center">
+            <div class="bg-indigo-100 p-4 rounded-xl">
+                <p class="text-sm font-semibold text-indigo-600">あなたの最高記録</p>
+                <p id="personal-best" class="text-2xl font-extrabold text-indigo-800 mt-1">---</p>
+            </div>
+            <div class="bg-purple-100 p-4 rounded-xl">
+                <p class="text-sm font-semibold text-purple-600">今日の最高記録</p>
+                <p id="daily-best" class="text-2xl font-extrabold text-purple-800 mt-1">---</p>
+                <p id="daily-best-user" class="text-xs text-purple-500 mt-1 truncate">ID: ---</p>
+            </div>
+        </div>
+
+        <!-- メインゲームエリア -->
+        <div id="game-container" class="text-center">
+            
+            <!-- ゲーム開始画面 -->
+            <div id="start-screen" class="transition-opacity duration-500">
+                <button id="start-button" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-full text-lg shadow-lg hover:shadow-xl transition duration-300 transform hover:scale-105">
+                    スタート
+                </button>
+            </div>
+            
+            <!-- 問題と入力エリア -->
+            <div id="quiz-screen" class="hidden transition-opacity duration-500">
+                <p id="timer" class="text-xl font-semibold text-red-600 mb-4">経過時間: 0.00 秒</p>
+                <p class="text-lg text-gray-600 mb-2">第 <span id="current-question-number" class="font-bold text-indigo-600">1</span> 問 / 5 問</p>
+                
+                <div class="my-6 bg-yellow-50 p-6 rounded-xl border-4 border-yellow-300 inline-block">
+                    <p id="question" class="text-5xl font-extrabold text-gray-800">
+                        ? &times; ? =
+                    </p>
+                </div>
+
+                <div class="flex justify-center items-center gap-2">
+                    <input type="number" id="answer-input" placeholder="答えを入力"
+                           class="w-full sm:w-64 p-3 text-lg text-center border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:ring-indigo-500"
+                           maxlength="3" inputmode="numeric">
+                    <button id="submit-answer" class="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-4 rounded-lg shadow-md transition duration-200">
+                        解答
+                    </button>
+                </div>
+                <p id="feedback" class="text-red-500 mt-3 font-medium hidden"></p>
+            </div>
+
+            <!-- 結果画面 -->
+            <div id="result-screen" class="hidden transition-opacity duration-500">
+                <p class="text-2xl font-semibold text-gray-700 mb-4">結果発表！</p>
+                <p id="final-time" class="text-5xl font-extrabold text-green-700 mb-6">0.00 秒</p>
+                
+                <!-- お祝いメッセージ -->
+                <div id="celebration" class="bg-yellow-200 text-yellow-800 p-4 rounded-xl mb-6 font-bold text-xl celebration-message hidden">
+                    🎉 新しい最高記録を達成しました！おめでとうございます！ 🎉
+                </div>
+
+                <button id="reset-button" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-full text-lg shadow-lg transition duration-300">
+                    もう一度挑戦する
+                </button>
+            </div>
+        </div>
+        
+        <p id="loading-message" class="text-center text-gray-500 mt-6 hidden">データを読み込み中...</p>
+    </div>
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firestoreのログレベルを設定 (デバッグ用)
+        setLogLevel('Debug');
+
+        // グローバル変数（Canvas環境から提供されるものを含む）
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-kuku-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { /* development fallback config */ };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Firebase初期化
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        let userId = null;
+        let isAuthReady = false;
+
+        // UI要素の参照
+        const personalBestEl = document.getElementById('personal-best');
+        const dailyBestEl = document.getElementById('daily-best');
+        const dailyBestUserEl = document.getElementById('daily-best-user');
+        const startScreen = document.getElementById('start-screen');
+        const quizScreen = document.getElementById('quiz-screen');
+        const resultScreen = document.getElementById('result-screen');
+        const questionEl = document.getElementById('question');
+        const answerInput = document.getElementById('answer-input');
+        const submitAnswerBtn = document.getElementById('submit-answer');
+        const currentQuestionNumberEl = document.getElementById('current-question-number');
+        const timerEl = document.getElementById('timer');
+        const finalTimeEl = document.getElementById('final-time');
+        const celebrationEl = document.getElementById('celebration');
+        const loadingMessageEl = document.getElementById('loading-message');
+
+        // ゲーム状態
+        let questions = [];
+        let currentQuestionIndex = 0;
+        let startTime = 0;
+        let timerInterval = null;
+        let personalBestTime = Infinity; // 初期値は無限大
+        let dailyBestTime = Infinity; // 初期値は無限大
+        const totalQuestions = 5;
+
+        // --- ユーティリティ関数 ---
+
+        /**
+         * ミリ秒を "秒.ミリ秒" 形式の文字列にフォーマットする
+         * @param {number} ms - ミリ秒
+         * @returns {string} フォーマットされた時間文字列
+         */
+        const formatTime = (ms) => {
+            if (ms === Infinity) return '---';
+            const seconds = (ms / 1000).toFixed(2);
+            return `${seconds} 秒`;
+        };
+
+        /**
+         * 今日の日付を YYYY-MM-DD 形式で取得する (UTCベースではなくローカルタイムゾーンベース)
+         * @returns {string} 今日の日付
+         */
+        const getTodayDateString = () => {
+            const date = new Date();
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        };
+
+        // --- Firestoreパス定義 ---
+
+        const getPersonalBestDocRef = () => {
+            return doc(db, `artifacts/${appId}/users/${userId}/kuku_records`, 'personal_best');
+        };
+
+        const getDailyBestDocRef = (date) => {
+            return doc(db, `artifacts/${appId}/public/data/kuku_daily_records`, date);
+        };
+
+        // --- ゲームロジック ---
+
+        /**
+         * 問題を生成する
+         */
+        const generateQuestions = () => {
+            const multipliers = [6, 7, 8, 9];
+            const allPairs = [];
+            
+            // 6, 7, 8, 9 の段 × 1〜9 の全ての問題を生成
+            for (const a of multipliers) {
+                for (let b = 1; b <= 9; b++) {
+                    allPairs.push({ a, b, result: a * b });
+                }
+            }
+
+            // ランダムにシャッフル
+            allPairs.sort(() => Math.random() - 0.5);
+            
+            // 上位5問を選択
+            questions = allPairs.slice(0, totalQuestions);
+        };
+
+        /**
+         * タイマーを開始する
+         */
+        const startTimer = () => {
+            startTime = Date.now();
+            timerInterval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                timerEl.textContent = `経過時間: ${formatTime(elapsed)}`;
+            }, 10);
+        };
+
+        /**
+         * タイマーを停止し、経過時間を返す
+         * @returns {number} 経過時間 (ミリ秒)
+         */
+        const stopTimer = () => {
+            clearInterval(timerInterval);
+            const elapsed = Date.now() - startTime;
+            return elapsed;
+        };
+
+        /**
+         * 次の問題を表示する
+         */
+        const showNextQuestion = () => {
+            if (currentQuestionIndex < totalQuestions) {
+                const q = questions[currentQuestionIndex];
+                questionEl.textContent = `${q.a} × ${q.b} =`;
+                currentQuestionNumberEl.textContent = currentQuestionIndex + 1;
+                answerInput.value = '';
+                answerInput.focus();
+                document.getElementById('feedback').classList.add('hidden');
+            } else {
+                endGame();
+            }
+        };
+
+        /**
+         * ゲームを開始する
+         */
+        const startGame = () => {
+            generateQuestions();
+            currentQuestionIndex = 0;
+            
+            // UI切り替え
+            startScreen.classList.add('hidden');
+            resultScreen.classList.add('hidden');
+            quizScreen.classList.remove('hidden');
+            celebrationEl.classList.add('hidden');
+
+            startTimer();
+            showNextQuestion();
+        };
+
+        /**
+         * 解答をチェックする
+         */
+        const checkAnswer = () => {
+            const userAnswer = parseInt(answerInput.value, 10);
+            const q = questions[currentQuestionIndex];
+            const feedbackEl = document.getElementById('feedback');
+            
+            if (isNaN(userAnswer)) {
+                feedbackEl.textContent = '数字を入力してください。';
+                feedbackEl.classList.remove('hidden');
+                return;
+            }
+
+            if (userAnswer === q.result) {
+                currentQuestionIndex++;
+                showNextQuestion();
+            } else {
+                feedbackEl.textContent = '残念！もう一度挑戦してください。';
+                feedbackEl.classList.remove('hidden');
+            }
+        };
+
+        /**
+         * ゲームを終了し、スコアを記録する
+         */
+        const endGame = async () => {
+            const finalTimeMs = stopTimer();
+            finalTimeEl.textContent = formatTime(finalTimeMs);
+            
+            // スコアを記録
+            await saveScore(finalTimeMs);
+
+            // UI切り替え
+            quizScreen.classList.add('hidden');
+            resultScreen.classList.remove('hidden');
+        };
+
+        // --- Firestore関連関数 ---
+
+        /**
+         * Firestoreから個人および今日の最高記録を読み込む
+         */
+        const loadScores = async () => {
+            if (!isAuthReady || !userId) return;
+
+            loadingMessageEl.classList.remove('hidden');
+            
+            try {
+                // 1. 個人の最高記録をロード
+                const personalDocRef = getPersonalBestDocRef();
+                const personalDoc = await getDoc(personalDocRef);
+
+                if (personalDoc.exists()) {
+                    const data = personalDoc.data();
+                    personalBestTime = data.bestTime || Infinity;
+                } else {
+                    personalBestTime = Infinity;
+                }
+                personalBestEl.textContent = formatTime(personalBestTime);
+
+
+                // 2. 今日の最高記録をロード
+                const today = getTodayDateString();
+                const dailyDocRef = getDailyBestDocRef(today);
+                const dailyDoc = await getDoc(dailyDocRef);
+
+                if (dailyDoc.exists()) {
+                    const data = dailyDoc.data();
+                    dailyBestTime = data.bestTime || Infinity;
+                    const dailyBestUserId = data.userId || '---';
+                    dailyBestUserEl.textContent = `ID: ${dailyBestUserId.substring(0, 8)}...`;
+                } else {
+                    dailyBestTime = Infinity;
+                    dailyBestUserEl.textContent = `ID: ---`;
+                }
+                dailyBestEl.textContent = formatTime(dailyBestTime);
+                
+            } catch (error) {
+                console.error("スコアの読み込み中にエラーが発生しました:", error);
+                // UIにはデフォルト値を表示したままにする
+            } finally {
+                loadingMessageEl.classList.add('hidden');
+            }
+        };
+
+        /**
+         * スコアをFirestoreに保存し、最高記録を更新する
+         * @param {number} newTimeMs - 新しいスコア (ミリ秒)
+         */
+        const saveScore = async (newTimeMs) => {
+            if (!isAuthReady || !userId) return;
+
+            let isNewPersonalBest = false;
+            let isNewDailyBest = false;
+
+            // 1. 個人の最高記録の更新
+            if (newTimeMs < personalBestTime) {
+                isNewPersonalBest = true;
+                personalBestTime = newTimeMs;
+                personalBestEl.textContent = formatTime(newTimeMs);
+                celebrationEl.classList.remove('hidden');
+
+                try {
+                    const personalDocRef = getPersonalBestDocRef();
+                    // 新しい最高記録を保存
+                    await setDoc(personalDocRef, {
+                        bestTime: newTimeMs,
+                        lastUpdated: Date.now(),
+                        userId: userId,
+                    }, { merge: true }); // merge: true で他のフィールドを保持
+
+                } catch (error) {
+                    console.error("個人最高記録の保存中にエラーが発生しました:", error);
+                }
+            } else {
+                celebrationEl.classList.add('hidden');
+            }
+
+            // 2. 今日の最高記録の更新 (トランザクションではないため、競合の可能性はあるがシンプルに実装)
+            const today = getTodayDateString();
+            const dailyDocRef = getDailyBestDocRef(today);
+
+            try {
+                // ドキュメントを取得
+                const dailyDoc = await getDoc(dailyDocRef);
+                const currentDailyBest = dailyDoc.exists() ? (dailyDoc.data().bestTime || Infinity) : Infinity;
+
+                if (newTimeMs < currentDailyBest) {
+                    isNewDailyBest = true;
+                    dailyBestTime = newTimeMs;
+                    dailyBestEl.textContent = formatTime(newTimeMs);
+                    dailyBestUserEl.textContent = `ID: ${userId.substring(0, 8)}...`;
+                    
+                    // 新しい最高記録を保存
+                    await setDoc(dailyDocRef, {
+                        date: today,
+                        bestTime: newTimeMs,
+                        userId: userId,
+                        userName: userId.substring(0, 8), // ユーザー名としてIDの一部を保存
+                        lastUpdated: Date.now(),
+                    }, { merge: true });
+                }
+
+            } catch (error) {
+                console.error("今日の最高記録の更新中にエラーが発生しました:", error);
+            }
+        };
+
+        // --- イベントリスナー設定 ---
+
+        document.getElementById('start-button').addEventListener('click', startGame);
+        document.getElementById('reset-button').addEventListener('click', startGame);
+        
+        submitAnswerBtn.addEventListener('click', checkAnswer);
+
+        // Enterキーで解答を送信
+        answerInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault(); // フォーム送信を防ぐ
+                checkAnswer();
+            }
+        });
+
+
+        // --- 初期化と認証 ---
+
+        /**
+         * 認証状態の変更を監視し、Firestoreの操作を開始する
+         */
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+                isAuthReady = true;
+                console.log("Firebase認証完了。ユーザーID:", userId);
+                await loadScores();
+            } else {
+                // 認証失敗時やサインアウト時
+                console.warn("ユーザーがサインインしていません。");
+            }
+        });
+
+        /**
+         * 初期認証処理
+         */
+        const initializeAuth = async () => {
+            loadingMessageEl.classList.remove('hidden');
+            try {
+                if (initialAuthToken) {
+                    // カスタム認証トークンでサインイン
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // トークンがない場合は匿名サインイン
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Firebase認証に失敗しました:", error);
+                // 認証失敗時もアプリ自体は使えるように、匿名サインインを試みる（上記で既にやっているが一応）
+                await signInAnonymously(auth);
+            } finally {
+                // onAuthStateChangedが呼ばれるのを待つ
+            }
+        };
+
+        // アプリケーション起動
+        window.onload = initializeAuth;
+
+    </script>
+</body>
+</html>
