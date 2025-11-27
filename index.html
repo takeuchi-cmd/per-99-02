@@ -94,6 +94,9 @@
         </div>
         
         <p id="loading-message" class="text-center text-gray-500 mt-6 hidden">データを読み込み中...</p>
+        <p id="error-message" class="text-center text-red-600 mt-6 hidden font-semibold">
+            🚨 データベース接続エラー: アプリの設定を確認してください。記録機能は無効です。
+        </p>
     </div>
 
     <!-- Firebase SDK Imports -->
@@ -107,13 +110,36 @@
 
         // グローバル変数（Canvas環境から提供されるものを含む）
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-kuku-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { /* development fallback config */ };
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-        // Firebase初期化
-        const app = initializeApp(firebaseConfig);
-        const db = getFirestore(app);
-        const auth = getAuth(app);
+        let parsedFirebaseConfig = {};
+        let isFirebaseAvailable = false;
+        
+        try {
+            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+                parsedFirebaseConfig = JSON.parse(__firebase_config);
+                isFirebaseAvailable = true;
+            }
+        } catch (error) {
+            console.error("Firebase設定のパースに失敗しました (おそらく不正なJSON):", error);
+            // isFirebaseAvailable は false のまま
+        }
+
+        let app = null;
+        let db = null;
+        let auth = null;
+
+        if (isFirebaseAvailable) {
+            try {
+                // Firebase初期化
+                app = initializeApp(parsedFirebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+            } catch (e) {
+                console.error("Firebaseの初期化に失敗しました:", e);
+                isFirebaseAvailable = false;
+            }
+        }
 
         let userId = null;
         let isAuthReady = false;
@@ -133,6 +159,7 @@
         const finalTimeEl = document.getElementById('final-time');
         const celebrationEl = document.getElementById('celebration');
         const loadingMessageEl = document.getElementById('loading-message');
+        const errorMessageEl = document.getElementById('error-message');
 
         // ゲーム状態
         let questions = [];
@@ -171,14 +198,42 @@
         // --- Firestoreパス定義 ---
 
         const getPersonalBestDocRef = () => {
+            if (!db || !userId) return null;
             return doc(db, `artifacts/${appId}/users/${userId}/kuku_records`, 'personal_best');
         };
 
         const getDailyBestDocRef = (date) => {
+            if (!db) return null;
             return doc(db, `artifacts/${appId}/public/data/kuku_daily_records`, date);
         };
 
         // --- ゲームロジック ---
+        
+        /**
+         * ゲームを初期化して開始する
+         */
+        const startGame = () => {
+            // タイマーが動いている場合は停止
+            if (timerInterval) {
+                clearInterval(timerInterval);
+            }
+
+            // ゲーム状態のリセット
+            currentQuestionIndex = 0;
+            generateQuestions();
+
+            // UIの切り替えと初期表示
+            startScreen.classList.add('hidden');
+            resultScreen.classList.add('hidden');
+            quizScreen.classList.remove('hidden');
+            
+            timerEl.textContent = '経過時間: 0.00 秒';
+            celebrationEl.classList.add('hidden');
+
+            // 最初の問題表示とタイマー開始
+            showNextQuestion();
+            startTimer();
+        };
 
         /**
          * 問題を生成する
@@ -218,6 +273,7 @@
          */
         const stopTimer = () => {
             clearInterval(timerInterval);
+            timerInterval = null; // タイマー変数をリセット
             const elapsed = Date.now() - startTime;
             return elapsed;
         };
@@ -236,23 +292,6 @@
             } else {
                 endGame();
             }
-        };
-
-        /**
-         * ゲームを開始する
-         */
-        const startGame = () => {
-            generateQuestions();
-            currentQuestionIndex = 0;
-            
-            // UI切り替え
-            startScreen.classList.add('hidden');
-            resultScreen.classList.add('hidden');
-            quizScreen.classList.remove('hidden');
-            celebrationEl.classList.add('hidden');
-
-            startTimer();
-            showNextQuestion();
         };
 
         /**
@@ -285,8 +324,12 @@
             const finalTimeMs = stopTimer();
             finalTimeEl.textContent = formatTime(finalTimeMs);
             
-            // スコアを記録
-            await saveScore(finalTimeMs);
+            // Firebaseが利用可能な場合のみスコアを記録
+            if (isFirebaseAvailable) {
+                await saveScore(finalTimeMs);
+            } else {
+                celebrationEl.classList.add('hidden');
+            }
 
             // UI切り替え
             quizScreen.classList.add('hidden');
@@ -299,39 +342,43 @@
          * Firestoreから個人および今日の最高記録を読み込む
          */
         const loadScores = async () => {
-            if (!isAuthReady || !userId) return;
+            if (!isAuthReady || !userId || !isFirebaseAvailable) return;
 
             loadingMessageEl.classList.remove('hidden');
             
             try {
                 // 1. 個人の最高記録をロード
                 const personalDocRef = getPersonalBestDocRef();
-                const personalDoc = await getDoc(personalDocRef);
+                if (personalDocRef) {
+                    const personalDoc = await getDoc(personalDocRef);
 
-                if (personalDoc.exists()) {
-                    const data = personalDoc.data();
-                    personalBestTime = data.bestTime || Infinity;
-                } else {
-                    personalBestTime = Infinity;
+                    if (personalDoc.exists()) {
+                        const data = personalDoc.data();
+                        personalBestTime = data.bestTime || Infinity;
+                    } else {
+                        personalBestTime = Infinity;
+                    }
+                    personalBestEl.textContent = formatTime(personalBestTime);
                 }
-                personalBestEl.textContent = formatTime(personalBestTime);
 
 
                 // 2. 今日の最高記録をロード
                 const today = getTodayDateString();
                 const dailyDocRef = getDailyBestDocRef(today);
-                const dailyDoc = await getDoc(dailyDocRef);
+                if (dailyDocRef) {
+                    const dailyDoc = await getDoc(dailyDocRef);
 
-                if (dailyDoc.exists()) {
-                    const data = dailyDoc.data();
-                    dailyBestTime = data.bestTime || Infinity;
-                    const dailyBestUserId = data.userId || '---';
-                    dailyBestUserEl.textContent = `ID: ${dailyBestUserId.substring(0, 8)}...`;
-                } else {
-                    dailyBestTime = Infinity;
-                    dailyBestUserEl.textContent = `ID: ---`;
+                    if (dailyDoc.exists()) {
+                        const data = dailyDoc.data();
+                        dailyBestTime = data.bestTime || Infinity;
+                        const dailyBestUserId = data.userId || '---';
+                        dailyBestUserEl.textContent = `ID: ${dailyBestUserId.substring(0, 8)}...`;
+                    } else {
+                        dailyBestTime = Infinity;
+                        dailyBestUserEl.textContent = `ID: ---`;
+                    }
+                    dailyBestEl.textContent = formatTime(dailyBestTime);
                 }
-                dailyBestEl.textContent = formatTime(dailyBestTime);
                 
             } catch (error) {
                 console.error("スコアの読み込み中にエラーが発生しました:", error);
@@ -346,7 +393,7 @@
          * @param {number} newTimeMs - 新しいスコア (ミリ秒)
          */
         const saveScore = async (newTimeMs) => {
-            if (!isAuthReady || !userId) return;
+            if (!isAuthReady || !userId || !isFirebaseAvailable) return;
 
             let isNewPersonalBest = false;
             let isNewDailyBest = false;
@@ -360,12 +407,14 @@
 
                 try {
                     const personalDocRef = getPersonalBestDocRef();
-                    // 新しい最高記録を保存
-                    await setDoc(personalDocRef, {
-                        bestTime: newTimeMs,
-                        lastUpdated: Date.now(),
-                        userId: userId,
-                    }, { merge: true }); // merge: true で他のフィールドを保持
+                    if (personalDocRef) {
+                        // 新しい最高記録を保存
+                        await setDoc(personalDocRef, {
+                            bestTime: newTimeMs,
+                            lastUpdated: Date.now(),
+                            userId: userId,
+                        }, { merge: true }); // merge: true で他のフィールドを保持
+                    }
 
                 } catch (error) {
                     console.error("個人最高記録の保存中にエラーが発生しました:", error);
@@ -378,29 +427,31 @@
             const today = getTodayDateString();
             const dailyDocRef = getDailyBestDocRef(today);
 
-            try {
-                // ドキュメントを取得
-                const dailyDoc = await getDoc(dailyDocRef);
-                const currentDailyBest = dailyDoc.exists() ? (dailyDoc.data().bestTime || Infinity) : Infinity;
+            if (dailyDocRef) {
+                try {
+                    // ドキュメントを取得
+                    const dailyDoc = await getDoc(dailyDocRef);
+                    const currentDailyBest = dailyDoc.exists() ? (dailyDoc.data().bestTime || Infinity) : Infinity;
 
-                if (newTimeMs < currentDailyBest) {
-                    isNewDailyBest = true;
-                    dailyBestTime = newTimeMs;
-                    dailyBestEl.textContent = formatTime(newTimeMs);
-                    dailyBestUserEl.textContent = `ID: ${userId.substring(0, 8)}...`;
-                    
-                    // 新しい最高記録を保存
-                    await setDoc(dailyDocRef, {
-                        date: today,
-                        bestTime: newTimeMs,
-                        userId: userId,
-                        userName: userId.substring(0, 8), // ユーザー名としてIDの一部を保存
-                        lastUpdated: Date.now(),
-                    }, { merge: true });
+                    if (newTimeMs < currentDailyBest) {
+                        isNewDailyBest = true;
+                        dailyBestTime = newTimeMs;
+                        dailyBestEl.textContent = formatTime(newTimeMs);
+                        dailyBestUserEl.textContent = `ID: ${userId.substring(0, 8)}...`;
+                        
+                        // 新しい最高記録を保存
+                        await setDoc(dailyDocRef, {
+                            date: today,
+                            bestTime: newTimeMs,
+                            userId: userId,
+                            userName: userId.substring(0, 8), // ユーザー名としてIDの一部を保存
+                            lastUpdated: Date.now(),
+                        }, { merge: true });
+                    }
+
+                } catch (error) {
+                    console.error("今日の最高記録の更新中にエラーが発生しました:", error);
                 }
-
-            } catch (error) {
-                console.error("今日の最高記録の更新中にエラーが発生しました:", error);
             }
         };
 
@@ -425,23 +476,37 @@
         /**
          * 認証状態の変更を監視し、Firestoreの操作を開始する
          */
-        onAuthStateChanged(auth, async (user) => {
-            if (user) {
-                userId = user.uid;
-                isAuthReady = true;
-                console.log("Firebase認証完了。ユーザーID:", userId);
-                await loadScores();
-            } else {
-                // 認証失敗時やサインアウト時
-                console.warn("ユーザーがサインインしていません。");
-            }
-        });
+        if (isFirebaseAvailable) {
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    isAuthReady = true;
+                    console.log("Firebase認証完了。ユーザーID:", userId);
+                    await loadScores();
+                } else {
+                    // 認証失敗時やサインアウト時
+                    console.warn("ユーザーがサインインしていません。");
+                }
+            });
+        }
+
 
         /**
          * 初期認証処理
          */
         const initializeAuth = async () => {
+            if (!isFirebaseAvailable) {
+                // Firebaseが利用できない場合はエラーメッセージを表示し、ゲーム開始ボタンを有効化する
+                loadingMessageEl.classList.add('hidden');
+                errorMessageEl.classList.remove('hidden');
+                isAuthReady = true; // 認証不要とみなし、ゲームを許可
+                console.warn("Firebase設定が見つからないため、記録機能は無効です。");
+                return;
+            }
+
             loadingMessageEl.classList.remove('hidden');
+            errorMessageEl.classList.add('hidden');
+
             try {
                 if (initialAuthToken) {
                     // カスタム認証トークンでサインイン
@@ -452,11 +517,18 @@
                 }
             } catch (error) {
                 console.error("Firebase認証に失敗しました:", error);
-                // 認証失敗時もアプリ自体は使えるように、匿名サインインを試みる（上記で既にやっているが一応）
+                // 認証失敗時もアプリ自体は使えるように、匿名サインインを試みる
                 await signInAnonymously(auth);
             } finally {
                 // onAuthStateChangedが呼ばれるのを待つ
             }
+        };
+
+        // ゲーム開始関数をグローバルスコープ（または window.onload の外）で定義
+        const startGameOutsideOnload = () => {
+            // startGame は onAuthStateChanged または reset-button のクリックで呼ばれる
+            // ここでstartGameを直接定義すると、HTMLからの呼び出しが可能になる
+            // ただし、今回はstartGameをスクリプト内に定義し、イベントリスナーで呼び出す方式を採用
         };
 
         // アプリケーション起動
